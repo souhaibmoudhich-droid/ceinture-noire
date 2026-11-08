@@ -1,4 +1,4 @@
-const CACHE="ceinture-noire-v2";
+const CACHE="ceinture-noire-v3";
 const SHELL=["./","./index.html","./manifest.webmanifest","./icon-180.png","./icon-512.png"];
 const FONTS=["fonts.googleapis.com","fonts.gstatic.com"];
 self.addEventListener("install",e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()))});

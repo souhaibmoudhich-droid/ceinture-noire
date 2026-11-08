@@ -112,7 +112,7 @@ h2.section::after{content:"";flex:1;height:var(--b);background:var(--ink)}
 /* missions */
 .note{font-weight:700;font-size:13px;padding:9px 12px;border:2px dashed var(--ink);background:var(--panel)}
 .list{display:grid;gap:14px}
-.mission{display:grid;grid-template-columns:58px minmax(0,1fr);gap:0;overflow:hidden}
+.mission{display:grid;grid-template-columns:58px minmax(0,1fr);gap:0}
 .mission .clock{background:var(--ink);color:var(--paper);display:grid;align-content:start;justify-items:center;padding:10px 4px;gap:2px;font-variant-numeric:tabular-nums}
 .mission .clock b{font:900 14px/1 var(--mono)}
 .mission .clock small{font:500 11px/1 var(--mono);opacity:.7}
@@ -138,6 +138,10 @@ h2.section::after{content:"";flex:1;height:var(--b);background:var(--ink)}
 .mission .ok{position:absolute;right:10px;top:8px;font-family:var(--display);color:var(--good);border:3px solid var(--good);padding:1px 7px;transform:rotate(8deg);font-size:15px;background:var(--panel)}
 .mission .ko{position:absolute;right:10px;top:8px;font-family:var(--display);color:var(--hit);border:3px solid var(--hit);padding:1px 7px;transform:rotate(-6deg);font-size:13px;background:var(--panel)}
 .mission.skip{opacity:.8}
+.mission.agenda{box-shadow:none;border-style:dashed;background:repeating-linear-gradient(-45deg,var(--panel) 0 8px,var(--tone) 8px 10px)}
+.mission.agenda .clock{background:var(--tone);color:var(--ink)}
+.mission.agenda .ttl{font-size:14px;color:var(--muted)}
+.mission.agenda .body{padding-block:8px}
 .mission.has-stamp .ttl{padding-right:62px}
 
 /* formulaire */
@@ -284,6 +288,20 @@ nav.tabs button[aria-current="page"]{background:var(--pop);color:#111114;opacity
         </ol>
       </details>
     </div>
+    <h2 class="section"><span class="sfx">AGENDA IPHONE</span></h2>
+    <div class="panel set">
+      <div id="agendaInfo" class="note"></div>
+      <div class="row"><button class="btn plain" id="agendaReload">Recharger l'agenda</button></div>
+      <details><summary>Brancher ton agenda (une seule fois)</summary>
+        <ol class="steps">
+          <li>Sur l'iPhone, app <b>Calendrier</b> → <b>Calendriers</b> (en bas) → touche le <b>ⓘ</b> à côté de ton agenda (iCloud).</li>
+          <li>Active <b>Calendrier public</b>, puis <b>Partager le lien</b> → <b>Copier</b>.</li>
+          <li>Sur GitHub, dépôt ceinture-noire → <b>Settings</b> → <b>Secrets and variables</b> → <b>Actions</b> → <b>New repository secret</b>.</li>
+          <li>Nom : <b>ICLOUD_URLS</b>. Valeur : colle le lien (plusieurs agendas : un lien par ligne). <b>Add secret</b>.</li>
+          <li>Onglet <b>Actions</b> → <b>Agenda iPhone</b> → <b>Run workflow</b>. Ensuite, ça se met à jour seul toutes les 30 min.</li>
+        </ol>
+      </details>
+    </div>
     <h2 class="section"><span class="sfx">DONNÉES</span></h2>
     <div class="panel set">
       <div class="note">Tout est gardé sur l'appareil et marche sans wifi. En ligne, les appareils qui ont le même jeton fusionnent leurs données.</div>
@@ -317,7 +335,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"
 /* ---------- storage ---------- */
 const LS={get(k,f){try{const v=localStorage.getItem(k);return v?JSON.parse(v):f}catch(e){return f}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 const RAW_KEY="cn.raw.v1", SYNC_KEY="cn.sync.v1";
-function emptyRaw(){return{start:todayK(),st:{},custom:{},off:{}}}
+function emptyRaw(){return{start:todayK(),st:{},custom:{},off:{},busy:{}}}
 let raw=LS.get(RAW_KEY,null)||emptyRaw();
 let sync=LS.get(SYNC_KEY,{token:"",gistId:"",login:"",last:0,err:""});
 const saveRaw=()=>LS.set(RAW_KEY,raw), saveSync=()=>LS.set(SYNC_KEY,sync);
@@ -365,37 +383,74 @@ function template(dow,L){
 const CAP={0:170,1:170,2:200,3:200,4:170,5:170,6:260};
 const START={0:600,1:990,2:960,3:960,4:990,5:990,6:570};
 
-function schedule(items,dow){
+const DAY_END=21*60+30; // rien ne commence après ça : au-delà, la mission passe à un autre jour
+
+/* agenda iPhone : créneaux occupés publiés dans busy.json par la tâche GitHub */
+const AGENDA_KEY="cn.agenda.v1";
+let FEED=LS.get(AGENDA_KEY,{updated:null,days:{}});
+function busyFor(d){
+  const snap=raw.busy&&raw.busy[d];
+  const v=snap?snap.v:(FEED.days&&FEED.days[d])||[];
+  return v.map(([s,e])=>({start:s,end:e}));
+}
+// garde une copie de l'agenda du jour : les jours passés restent tels qu'ils étaient
+function snapshotBusy(){
+  const t=todayK(), v=FEED.days&&FEED.days[t];
+  if(!v) return false;
+  raw.busy=raw.busy||{};
+  if(JSON.stringify(raw.busy[t]&&raw.busy[t].v)===JSON.stringify(v)) return false;
+  raw.busy[t]={v,t:Date.now()}; saveRaw(); return true;
+}
+
+function schedule(items,dow,busy){
+  const blocks=[...items.filter(i=>i.fixed!=null).map(i=>({start:i.fixed,end:i.fixed+i.min})),...busy].sort((a,b)=>a.start-b.start);
   const fixed=items.filter(i=>i.fixed!=null).map(i=>({...i,start:i.fixed}));
   const flex=items.filter(i=>i.fixed==null).sort((a,b)=>(ORDER[a.cat]-ORDER[b.cat]));
-  let c=START[dow];
+  const placed=[], overflow=[];
   for(const it of flex){
-    for(const f of fixed){ if(c<f.start+f.min+15 && c+it.min>f.start-10) c=f.start+f.min+15; }
-    it.start=c; c+=it.min+10;
+    // premier créneau libre à partir de l'heure de début (remplit les trous entre deux rendez-vous)
+    let x=START[dow], moved=true;
+    while(moved){moved=false;for(const b of blocks){ if(x<b.end+10 && x+it.min>b.start-10){x=b.end+10;moved=true;} }}
+    if(x>DAY_END){overflow.push(it);continue}
+    it.start=x; placed.push(it); blocks.push({start:x,end:x+it.min});
   }
-  return [...fixed,...flex].sort((a,b)=>a.start-b.start);
+  return {items:[...fixed,...placed].sort((a,b)=>a.start-b.start),overflow};
 }
 const statusOf=id=>(raw.st[id]&&raw.st[id].s)||"todo";
 const isOff=d=>!!(raw.off[d]&&raw.off[d].v);
 
 function makeDay(d,L,backlog){
-  const dow=parseK(d).getDay(), off=isOff(d);
+  const dow=parseK(d).getDay(), off=isOff(d), busy=off?[]:busyFor(d);
   let items=template(dow,L).map(t=>({...t,id:`${d}:${t.key}`,tries:0}));
   for(const [cid,c] of Object.entries(raw.custom)){
     if(c.date===d && !c.del) items.push({id:"c:"+cid,cid,cat:c.cat,min:c.min,title:c.title,carry:true,tries:0,custom:true});
   }
+  const taken=[];
   if(!off){
     const judoDay=items.some(i=>i.cat==="judo");
     let used=items.reduce((s,i)=>s+i.min,0);
     for(let i=0;i<backlog.length;i++){
       const b=backlog[i];
       if(judoDay&&(b.cat==="force"||b.cat==="cardio")) continue;
+      if(b.cat!=="etude"&&b.key&&items.some(x=>x.key===b.key)) continue; // pas deux fois le même entraînement
       if(used+b.min>CAP[dow]) continue;
-      items.push({...b,id:`${d}:r:${b.id}`,carried:true});
+      items.push({...b,id:`${d}:r:${b.id}`,carried:true}); taken.push(b);
       used+=b.min; backlog.splice(i,1); i--;
     }
   }
-  return {date:d,dow,off,items:schedule(items,dow)};
+  const sch=schedule(items,dow,busy);
+  // pas de place à cause de l'agenda : les rattrapages retournent en attente,
+  // les missions du jour partent en rattrapage (sans compter comme un échec)
+  const moved=[];
+  for(const it of sch.overflow){
+    if(it.carried){const b=taken.find(x=>`${d}:r:${x.id}`===it.id); if(b) backlog.unshift(b);}
+    else if(it.carry){
+      if(it.cat!=="etude"&&it.key){const j=backlog.findIndex(x=>x.key===it.key);if(j>=0)backlog.splice(j,1)}
+      backlog.push({id:it.id,key:it.key,cat:it.cat,min:it.min,title:it.title,carry:true,tries:it.tries,from:d});
+    }
+    moved.push(it);
+  }
+  return {date:d,dow,off,busy,moved,items:sch.items};
 }
 function bump(L,k,dir){
   const l=L[k],def=LV[k];
@@ -500,11 +555,25 @@ function render(){
     <div class="panel counter${st>=3?" hot":""}"><b>${st}</b><span>Jours de série</span></div>
     <div class="panel counter"><b>${B.backlog.length}</b><span>Rattrapages</span></div>
     <div class="panel counter"><b>${belt.n?belt.n[1]-B.xp:0}</b><span>${belt.n?"min → "+belt.n[0]:"Ceinture max"}</span></div>`;
-  $("dayNote").innerHTML=view<today&&view>=raw.start?`<div class="note">Épisode terminé : lecture seule.</div>`:"";
+  const notes=[];
+  if(view<today&&view>=raw.start) notes.push("Épisode terminé : lecture seule.");
+  if(day.moved&&day.moved.length){
+    const nm=l=>l.map(m=>esc(m.title.split(" — ")[0])).join(", ");
+    const later=day.moved.filter(m=>m.carry), dropped=day.moved.filter(m=>!m.carry);
+    if(later.length) notes.push(`Agenda chargé : reporté à un autre jour → ${nm(later)}.`);
+    if(dropped.length) notes.push(`Pas de place aujourd'hui, sauté sans pénalité → ${nm(dropped)}.`);
+  }
+  $("dayNote").innerHTML=notes.map(n=>`<div class="note">${n}</div>`).join("");
   // missions
   const L=$("list"); L.innerHTML="";
   const nextId=isToday&&!day.off?(items.find(i=>statusOf(i.id)==="todo")||{}).id:null;
-  if(view>=raw.start) for(const it of items){
+  const rows=view>=raw.start?[...items,...(day.busy||[]).map(b=>({agenda:true,start:b.start,end:b.end}))].sort((a,b)=>a.start-b.start):[];
+  for(const it of rows){
+    if(it.agenda){
+      const el=document.createElement("div"); el.className="panel mission agenda";
+      el.innerHTML=`<div class="clock"><b>${hm(it.start)}</b><small>${hm(Math.min(it.end,1439))}</small></div><div class="body"><div class="ttl">Occupé</div><div class="tags"><span class="tag">Agenda iPhone</span></div></div>`;
+      L.appendChild(el); continue;
+    }
     const s=statusOf(it.id);
     const el=document.createElement("div");
     const stamp=view<=today&&(s==="done"||(view<today&&!day.off)||s==="skip");
@@ -561,6 +630,17 @@ function renderSettings(){
   const u=calUrl();
   $("calInfo").innerHTML=u?`<div class="mono" id="calUrl">${esc(u)}</div>`:`<div class="note">Le lien d'abonnement apparaît après la première synchro. En attendant, tu peux télécharger le fichier .ics.</div>`;
   $("copyCal").hidden=!u;
+  const n=Object.keys(FEED.days||{}).length;
+  $("agendaInfo").textContent=FEED.updated?`Agenda branché. Dernière lecture : ${new Date(FEED.updated).toLocaleString("fr-FR")}. Les missions évitent tes créneaux occupés${n?"":" (aucun rendez-vous trouvé pour les 3 prochaines semaines)"}.`:"Agenda pas encore branché. Suis les étapes ci-dessous : l'app placera tes missions autour de tes rendez-vous.";
+}
+async function loadAgenda(){
+  if(!navigator.onLine) return;
+  try{
+    const r=await fetch("busy.json",{cache:"no-store"});
+    if(!r.ok) return;
+    const j=await r.json();
+    if(j&&j.days){FEED=j;LS.set(AGENDA_KEY,FEED);if(snapshotBusy())queueSync();render();}
+  }catch(e){}
 }
 
 /* ---------- actions ---------- */
@@ -589,6 +669,7 @@ $("dlIcs").onclick=()=>{const blob=new Blob([makeIcs()],{type:"text/calendar"});
 $("token").value=sync.token||"";
 $("saveToken").onclick=()=>{sync.token=$("token").value.trim();sync.err="";saveSync();doSync()};
 $("syncNow").onclick=()=>doSync();
+$("agendaReload").onclick=()=>loadAgenda();
 $("forget").onclick=()=>{sync={token:"",gistId:"",login:"",last:0,err:""};saveSync();$("token").value="";render()};
 
 /* ---------- calendrier ---------- */
@@ -614,7 +695,7 @@ function makeIcs(){
 /* ---------- synchro (Gist GitHub privé) ---------- */
 const FILE="ceinture-noire.json";
 function mergeMap(a={},b={}){const o={...a};for(const[k,v]of Object.entries(b)){if(!o[k]||(v.t||0)>(o[k].t||0))o[k]=v}return o}
-function merge(a,b){return{start:a.start<b.start?a.start:b.start,st:mergeMap(a.st,b.st),custom:mergeMap(a.custom,b.custom),off:mergeMap(a.off,b.off)}}
+function merge(a,b){return{start:a.start<b.start?a.start:b.start,st:mergeMap(a.st,b.st),custom:mergeMap(a.custom,b.custom),off:mergeMap(a.off,b.off),busy:mergeMap(a.busy,b.busy)}}
 async function gh(path,opt={}){
   const r=await fetch("https://api.github.com"+path,{...opt,headers:{Authorization:"Bearer "+sync.token,Accept:"application/vnd.github+json","Content-Type":"application/json"}});
   if(r.status===401)throw new Error("jeton refusé (vérifie le droit « gist »)");
@@ -650,7 +731,9 @@ document.addEventListener("visibilitychange",()=>{if(document.visibilityState===
 setInterval(()=>{if(document.visibilityState==="visible")doSync()},120000);
 
 /* ---------- démarrage ---------- */
-render(); doSync();
+snapshotBusy(); render(); doSync(); loadAgenda();
+setInterval(()=>{if(document.visibilityState==="visible")loadAgenda()},600000);
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")loadAgenda()});
 if("serviceWorker" in navigator && (location.protocol==="https:"||location.hostname==="localhost")) navigator.serviceWorker.register("sw.js").catch(()=>{});
 </script>
 </body>
