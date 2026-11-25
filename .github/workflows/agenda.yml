@@ -1,6 +1,9 @@
 name: Agenda iPhone
-# Toutes les 30 minutes : lit les agendas iCloud partagés (secret ICLOUD_URLS)
-# et met à jour busy.json (créneaux occupés seulement, sans titres).
+# Toutes les 30 minutes (GitHub peut retarder ou espacer les tâches planifiées) :
+# lit les agendas iCloud partagés (secret ICLOUD_URLS) et met à jour busy.json
+# (créneaux occupés seulement, sans titres). Si un agenda est illisible, busy.json
+# garde les anciens créneaux avec un message d'erreur que l'app affiche, et la
+# tâche passe en rouge.
 on:
   schedule:
     - cron: "7,37 * * * *"
@@ -11,18 +14,28 @@ concurrency: agenda
 jobs:
   agenda:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install icalendar==6.1.0 recurring-ical-events==3.3.0
-      - run: python scripts/agenda.py
+      - run: pip install -r scripts/requirements.txt
+      - name: Lire l'agenda
+        run: python scripts/agenda.py
         env:
           ICLOUD_URLS: ${{ secrets.ICLOUD_URLS }}
       - name: Enregistrer busy.json
+        # aussi quand la lecture échoue : l'erreur est écrite dans busy.json pour l'app
+        if: ${{ !cancelled() }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add busy.json
-          git diff --cached --quiet || (git commit -m "Agenda mis à jour" && git push)
+          git diff --cached --quiet && exit 0
+          git commit -m "Agenda mis à jour"
+          for i in 1 2 3; do
+            git pull --rebase --quiet && git push && exit 0
+            sleep $((i * 5))
+          done
+          exit 1

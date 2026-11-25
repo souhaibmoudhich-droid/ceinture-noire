@@ -111,6 +111,7 @@ h2.section::after{content:"";flex:1;height:var(--b);background:var(--ink)}
 
 /* missions */
 .note{font-weight:700;font-size:13px;padding:9px 12px;border:2px dashed var(--ink);background:var(--panel)}
+.note.warn{border-style:solid;border-color:var(--hit);color:var(--hit)}
 .list{display:grid;gap:14px}
 .mission{display:grid;grid-template-columns:58px minmax(0,1fr);gap:0}
 .mission .clock{background:var(--ink);color:var(--paper);display:grid;align-content:start;justify-items:center;padding:10px 4px;gap:2px;font-variant-numeric:tabular-nums}
@@ -388,6 +389,16 @@ const DAY_END=21*60+30; // rien ne commence après ça : au-delà, la mission pa
 /* agenda iPhone : créneaux occupés publiés dans busy.json par la tâche GitHub */
 const AGENDA_KEY="cn.agenda.v1";
 let FEED=LS.get(AGENDA_KEY,{updated:null,days:{}});
+let agendaLoadErr=""; // échec du chargement de busy.json sur cet appareil (réseau, fichier abîmé)
+const AGENDA_STALE=26*3600e3; // la tâche réécrit busy.json au moins toutes les 12 h ; GitHub peut prendre du retard
+function agendaProblem(){
+  const fmt=t=>new Date(t).toLocaleString("fr-FR",{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
+  const last=FEED.checked||FEED.updated;
+  if(FEED.error&&FEED.error.msg) return `La lecture de ton agenda iPhone échoue depuis ${fmt(FEED.error.since)} (${esc(FEED.error.msg)}). Les créneaux affichés datent ${last?"du "+fmt(last):"d'avant"} : vérifie le lien dans le secret ICLOUD_URLS.`;
+  if(last&&Date.now()-new Date(last)>AGENDA_STALE) return `Agenda iPhone pas relu depuis ${fmt(last)} : la tâche GitHub « Agenda iPhone » est peut-être arrêtée (onglet Actions).`;
+  if(agendaLoadErr&&last) return `Impossible de recharger l'agenda (${esc(agendaLoadErr)}). On garde la dernière copie, du ${fmt(last)}.`;
+  return "";
+}
 function busyFor(d){
   const snap=raw.busy&&raw.busy[d];
   const v=snap?snap.v:(FEED.days&&FEED.days[d])||[];
@@ -563,7 +574,8 @@ function render(){
     if(later.length) notes.push(`Agenda chargé : reporté à un autre jour → ${nm(later)}.`);
     if(dropped.length) notes.push(`Pas de place aujourd'hui, sauté sans pénalité → ${nm(dropped)}.`);
   }
-  $("dayNote").innerHTML=notes.map(n=>`<div class="note">${n}</div>`).join("");
+  const ap=view>=today?agendaProblem():"";
+  $("dayNote").innerHTML=(ap?`<div class="note warn">⚠ ${ap}</div>`:"")+notes.map(n=>`<div class="note">${n}</div>`).join("");
   // missions
   const L=$("list"); L.innerHTML="";
   const nextId=isToday&&!day.off?(items.find(i=>statusOf(i.id)==="todo")||{}).id:null;
@@ -630,17 +642,24 @@ function renderSettings(){
   const u=calUrl();
   $("calInfo").innerHTML=u?`<div class="mono" id="calUrl">${esc(u)}</div>`:`<div class="note">Le lien d'abonnement apparaît après la première synchro. En attendant, tu peux télécharger le fichier .ics.</div>`;
   $("copyCal").hidden=!u;
-  const n=Object.keys(FEED.days||{}).length;
-  $("agendaInfo").textContent=FEED.updated?`Agenda branché. Dernière lecture : ${new Date(FEED.updated).toLocaleString("fr-FR")}. Les missions évitent tes créneaux occupés${n?"":" (aucun rendez-vous trouvé pour les 3 prochaines semaines)"}.`:"Agenda pas encore branché. Suis les étapes ci-dessous : l'app placera tes missions autour de tes rendez-vous.";
+  const n=Object.keys(FEED.days||{}).length, last=FEED.checked||FEED.updated, ap=agendaProblem(), ai=$("agendaInfo");
+  ai.className=ap?"note warn":"note";
+  ai.innerHTML=ap||(last?`Agenda branché. Dernière lecture : ${new Date(last).toLocaleString("fr-FR")}. Les missions évitent tes créneaux occupés${n?"":" (aucun rendez-vous trouvé pour les 3 prochaines semaines)"}.`:agendaLoadErr?`Impossible de charger l'agenda (${esc(agendaLoadErr)}).`:"Agenda pas encore branché. Suis les étapes ci-dessous : l'app placera tes missions autour de tes rendez-vous.");
 }
-async function loadAgenda(){
-  if(!navigator.onLine) return;
+async function loadAgenda(manual){
+  if(!navigator.onLine){if(manual){agendaLoadErr="hors ligne";render()}return}
+  const btn=$("agendaReload"); if(manual){btn.disabled=true;btn.textContent="Chargement…"}
+  let err="";
   try{
     const r=await fetch("busy.json",{cache:"no-store"});
-    if(!r.ok) return;
-    const j=await r.json();
-    if(j&&j.days){FEED=j;LS.set(AGENDA_KEY,FEED);if(snapshotBusy())queueSync();render();}
-  }catch(e){}
+    if(!r.ok) throw new Error(`fichier introuvable, HTTP ${r.status}`);
+    let j; try{j=await r.json()}catch(e){throw new Error("fichier busy.json abîmé")}
+    if(!j||typeof j.days!=="object"||Array.isArray(j.days)) throw new Error("fichier busy.json abîmé");
+    FEED=j;LS.set(AGENDA_KEY,FEED);if(snapshotBusy())queueSync();
+  }catch(e){err=e.message||"réseau"; if(err==="Failed to fetch"||err==="Load failed")err="réseau"}
+  agendaLoadErr=err;
+  if(manual){btn.disabled=false;btn.textContent="Recharger l'agenda"}
+  render();
 }
 
 /* ---------- actions ---------- */
@@ -669,7 +688,7 @@ $("dlIcs").onclick=()=>{const blob=new Blob([makeIcs()],{type:"text/calendar"});
 $("token").value=sync.token||"";
 $("saveToken").onclick=()=>{sync.token=$("token").value.trim();sync.err="";saveSync();doSync()};
 $("syncNow").onclick=()=>doSync();
-$("agendaReload").onclick=()=>loadAgenda();
+$("agendaReload").onclick=()=>loadAgenda(true);
 $("forget").onclick=()=>{sync={token:"",gistId:"",login:"",last:0,err:""};saveSync();$("token").value="";render()};
 
 /* ---------- calendrier ---------- */
